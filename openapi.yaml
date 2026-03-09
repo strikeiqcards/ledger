@@ -1,0 +1,1605 @@
+openapi: 3.0.3
+info:
+  title: SIQ Trading Cards Verification API
+  version: 1.0.0
+  description: |
+    Cryptographic verification and reputation layer for retail futures traders.
+
+    Every session is:
+      - Canonically serialized via RFC 8785 JSON Canonicalization Scheme (JCS)
+      - Hashed using BLAKE3 to generate a Session ID (SID)
+      - Signed with an offline ED25519 signing key (air-gapped generation)
+      - Inserted into an append-only PostgreSQL ledger
+      - Included in a daily Merkle tree
+      - Anchored publicly via GPG-signed GitHub commit
+
+    Sessions are cryptographically verifiable and cannot be altered once issued.
+
+    Verification Tiers:
+      - Silver (BASIC_VERIFIED): NT8 submission, hash integrity confirmed
+      - Blue (DEEP_VERIFIED): Broker statement / platform log cross-reference
+      - Gold (PROP_FIRM_CERTIFIED): Prop firm API signs + SIQ countersigns
+
+    Public Ledger:
+      https://github.com/strikeiqcards/ledger
+
+  contact:
+    name: SIQ Engineering
+    url: https://github.com/strikeiqcards/ledger
+    email: strikeiqalgos@gmail.com
+  license:
+    name: Proprietary - All Rights Reserved
+
+servers:
+  - url: https://api.siqtradingcards.com/v1
+    description: Production
+  - url: https://staging.api.siqtradingcards.com/v1
+    description: Staging / Integration Testing
+
+tags:
+  - name: Verification
+    description: Public session verification endpoints
+  - name: Sessions
+    description: Session submission and ledger ingestion
+  - name: Proofs
+    description: Merkle inclusion proof retrieval
+  - name: Anchors
+    description: Public ledger anchor lookup
+  - name: Crypto
+    description: Public key and cryptographic metadata
+  - name: System
+    description: Health, rate limit status
+  - name: Certification
+    description: Prop firm certification (Phase 2)
+  - name: Webhooks
+    description: Webhook management for prop firms (Phase 2)
+  - name: Traders
+    description: Trader Credit Score and session history (Phase 3)
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+
+  # ═══════════════════════════════════════════════
+  # PHASE 1 — CORE VERIFICATION
+  # ═══════════════════════════════════════════════
+
+  /verify/{sid}:
+    get:
+      tags: [Verification]
+      summary: Verify a trading session by SID
+      description: |
+        Public endpoint returning the full immutable session record for a given
+        Session ID (SID). Sessions are immutable — responses are permanently
+        cacheable.
+
+        Returns 404 with UNVERIFIED payload if SID is not found.
+      operationId: verifySession
+      security: []
+      parameters:
+        - name: sid
+          in: path
+          required: true
+          description: Session ID (BLAKE3 hash of canonical session payload, 64 hex chars)
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+            example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+      responses:
+        '200':
+          description: Session verified
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: "public, max-age=31536000, immutable"
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+                example: 1000
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+                example: 997
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+                example: 1712083200
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionRecord'
+              examples:
+                basic_verified:
+                  summary: Basic verified session
+                  value:
+                    sid: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+                    alias: "delta_hawk"
+                    instrument: "NQ"
+                    date: "2026-03-08"
+                    pnl_display:
+                      mode: "R_MULTIPLE"
+                      value: 3.5
+                      currency: null
+                    platform: "NINJATRADER_8"
+                    prop_firm: null
+                    verification_tier: "BASIC_VERIFIED"
+                    tier_label: "Silver"
+                    stats_schema_version: "1.0"
+                    session_stats:
+                      trade_count: 7
+                      win_rate: 0.71
+                      avg_r_multiple: 1.4
+                      max_drawdown_r: -1.0
+                      gross_pnl_r: 3.5
+                    certifications: []
+                    tags: []
+                    key_id: "siq-ed25519-2026-03-08"
+                    signature: "9f3a7c6d5e4f3a2b1c0d9e84c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0ff"
+                    leaf_hash: "b7c9e1f2a3d4e5f6071829304a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7"
+                    merkle_root: "c1d2e3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566"
+                    merkle_path:
+                      - hash: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5"
+                        position: "LEFT"
+                      - hash: "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6"
+                        position: "RIGHT"
+                    anchor_date: "2026-03-08"
+                    issued_at: "2026-03-08T20:15:32Z"
+                    card_version: "1.0.0"
+        '404':
+          description: SID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnverifiedResponse'
+              examples:
+                not_found:
+                  value:
+                    status: "UNVERIFIED"
+                    sid: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    checked_at: "2026-03-08T21:14:27Z"
+                    error:
+                      code: "SID_NOT_FOUND"
+                      message: "No verified session found for the provided SID."
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Ledger error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /verify/batch:
+    post:
+      tags: [Verification]
+      summary: Batch verify multiple SIDs
+      description: |
+        Verify up to 100 SIDs in a single request.
+        Designed for prop firm integrations that need to verify many traders.
+        Returns a map of SID to verification result.
+      operationId: verifyBatch
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sids]
+              properties:
+                sids:
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[a-f0-9]{64}$'
+                  minItems: 1
+                  maxItems: 100
+                  example:
+                    - "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+                    - "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      responses:
+        '200':
+          description: Batch verification results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: object
+                    additionalProperties:
+                      oneOf:
+                        - $ref: '#/components/schemas/SessionRecord'
+                        - $ref: '#/components/schemas/UnverifiedResponse'
+                  verified_count:
+                    type: integer
+                    example: 1
+                  unverified_count:
+                    type: integer
+                    example: 1
+                  queried_at:
+                    type: string
+                    format: date-time
+                    example: "2026-03-08T21:14:27Z"
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /verify/{sid}/widget:
+    get:
+      tags: [Verification]
+      summary: Embeddable verification badge widget
+      description: |
+        Returns embeddable HTML snippet displaying the verification tier badge.
+        Intended for prop firm websites and trader profile pages.
+
+        TODO: Implement in Phase 2.
+      operationId: getVerificationWidget
+      security: []
+      parameters:
+        - name: sid
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+        - name: theme
+          in: query
+          schema:
+            type: string
+            enum: [light, dark, auto]
+            default: auto
+        - name: size
+          in: query
+          schema:
+            type: string
+            enum: [small, medium, large]
+            default: medium
+      responses:
+        '200':
+          description: HTML widget
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: SID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /sessions:
+    post:
+      tags: [Sessions]
+      summary: Submit a trading session for verification
+      description: |
+        Accepts a canonical session payload. Server:
+          1. Validates JCS canonicalization
+          2. Computes BLAKE3 hash → SID
+          3. Signs with SIQ ED25519 private key (air-gapped)
+          4. Inserts into append-only PostgreSQL ledger
+          5. Returns SID, signature, issued_at
+
+        Requires API key. NT8 plugin submissions must include challenge token
+        (see /sessions/challenge).
+      operationId: createSession
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: X-NT8-Challenge-Token
+          in: header
+          required: false
+          description: Challenge token for NT8 plugin submissions (90s TTL)
+          schema:
+            type: string
+            example: "nt8_9f3c6b1a2d7e4f0c"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionPayload'
+            examples:
+              nt8_basic:
+                summary: NT8 basic session
+                value:
+                  alias: "delta_hawk"
+                  instrument: "NQ"
+                  date: "2026-03-08"
+                  pnl_display:
+                    mode: "R_MULTIPLE"
+                    value: 3.5
+                    currency: null
+                  platform: "NINJATRADER_8"
+                  prop_firm: null
+                  stats_schema_version: "1.0"
+                  session_stats:
+                    trade_count: 7
+                    win_rate: 0.71
+                    avg_r_multiple: 1.4
+                    max_drawdown_r: -1.0
+                    gross_pnl_r: 3.5
+                  tags: []
+                  nt8_challenge:
+                    token: "nt8_9f3c6b1a2d7e4f0c"
+                    issued_at: "2026-03-08T20:13:00Z"
+      responses:
+        '201':
+          description: Session accepted and recorded
+          headers:
+            Location:
+              schema:
+                type: string
+              example: "/verify/4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+                example: 60
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+                example: 59
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+                example: 1712083200
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCreatedResponse'
+        '400':
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_payload:
+                  value:
+                    error:
+                      code: "INVALID_PAYLOAD"
+                      message: "Payload failed schema validation."
+                      details:
+                        field: "session_stats.trade_count"
+                        issue: "Must be >= 1"
+                challenge_expired:
+                  value:
+                    error:
+                      code: "CHALLENGE_EXPIRED"
+                      message: "Challenge token is expired or invalid."
+        '401':
+          description: Auth required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Duplicate session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                duplicate:
+                  value:
+                    error:
+                      code: "DUPLICATE_SESSION"
+                      message: "A session with identical payload already exists."
+                      details:
+                        existing_sid: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Ledger error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /sessions/challenge:
+    post:
+      tags: [Sessions]
+      summary: Issue NT8 challenge token
+      description: |
+        Issues a short-lived challenge token for NT8 plugin submissions.
+        Tokens have 90 second TTL and are single-use.
+        Prevents replay attacks on session submission.
+      operationId: createChallenge
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  type: string
+                  example: "NT8_PLUGIN"
+                alias_hint:
+                  type: string
+                  example: "delta_hawk"
+      responses:
+        '201':
+          description: Challenge token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChallengeResponse'
+        '401':
+          description: Auth required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /sessions/{sid}/proof:
+    get:
+      tags: [Proofs]
+      summary: Get Merkle inclusion proof for a session
+      description: |
+        Returns the Merkle inclusion proof for a specific session.
+        Proof includes leaf hash, Merkle root, Merkle path with LEFT/RIGHT
+        sibling positions, anchor date, and GitHub commit URL.
+      operationId: getSessionProof
+      security: []
+      parameters:
+        - name: sid
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+            example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+      responses:
+        '200':
+          description: Merkle inclusion proof
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerkleProof'
+        '404':
+          description: SID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /anchors/{date}:
+    get:
+      tags: [Anchors]
+      summary: Get daily Merkle anchor by date
+      description: |
+        Returns the Merkle root anchor for a specific date, including
+        the GitHub commit URL and GPG signature reference.
+        Compliance engineers use this to independently verify the
+        daily ledger anchoring chain.
+      operationId: getAnchorByDate
+      security: []
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: Date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+            example: "2026-03-08"
+      responses:
+        '200':
+          description: Daily anchor record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnchorRecord'
+              examples:
+                anchor:
+                  value:
+                    date: "2026-03-08"
+                    merkle_root: "c1d2e3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566"
+                    session_count: 142
+                    github_commit_url: "https://github.com/strikeiqcards/ledger/commit/abc123def456"
+                    gpg_signed: true
+                    anchored_at: "2026-03-08T23:59:59Z"
+        '404':
+          description: No anchor found for this date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /crypto/public-key:
+    get:
+      tags: [Crypto]
+      summary: Get SIQ public signing key
+      description: |
+        Returns the current SIQ ED25519 public key used to sign all session records.
+        Use this key to independently verify any session signature without
+        relying on SIQ infrastructure.
+
+        The public key is also permanently published at:
+        https://github.com/strikeiqcards/ledger/blob/main/keys/siq_public_key.pub
+      operationId: getPublicKey
+      security: []
+      responses:
+        '200':
+          description: Current signing key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicKeyRecord'
+              examples:
+                key:
+                  value:
+                    key_id: "siq-ed25519-2026-03-08"
+                    algorithm: "ED25519"
+                    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuSmJKxULQf42JPodzZLt7tcBKcT1NjXiuIGKAO5Evt SIQ Trading Cards Ledger Key 2026"
+                    created_at: "2026-03-08T00:00:00Z"
+                    rotation_schedule: "annually or upon compromise"
+                    github_url: "https://github.com/strikeiqcards/ledger/blob/main/keys/siq_public_key.pub"
+
+  /health:
+    get:
+      tags: [System]
+      summary: API and ledger health status
+      description: |
+        Returns health status for the SIQ API and ledger.
+        Includes last anchor timestamp and GitHub ledger commit reference.
+        Returns 503 if ledger backend is unreachable.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: System healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                healthy:
+                  value:
+                    status: "ok"
+                    version: "1.0.0"
+                    environment: "production"
+                    ledger_record_count: 142031
+                    last_anchor_timestamp: "2026-03-08T23:59:59Z"
+                    git_ledger:
+                      repository: "https://github.com/strikeiqcards/ledger"
+                      last_commit_hash: "abc123def456abc123def456abc123def456abc123"
+                      last_commit_timestamp: "2026-03-08T23:59:59Z"
+        '503':
+          description: Ledger unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unhealthy:
+                  value:
+                    error:
+                      code: "LEDGER_ERROR"
+                      message: "Ledger backend unavailable."
+
+  /rate_limit:
+    get:
+      tags: [System]
+      summary: Get current rate limit status
+      description: |
+        Returns rate limit status for the authenticated API key.
+        Useful for integrations that need to throttle their own requests.
+      operationId: getRateLimit
+      responses:
+        '200':
+          description: Rate limit status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key_id:
+                    type: string
+                    example: "key_abc123"
+                  endpoints:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        limit:
+                          type: integer
+                        remaining:
+                          type: integer
+                        reset_at:
+                          type: string
+                          format: date-time
+                  queried_at:
+                    type: string
+                    format: date-time
+                    example: "2026-03-08T21:14:27Z"
+
+  # ═══════════════════════════════════════════════
+  # PHASE 2 — PROP FIRM CERTIFICATION
+  # ═══════════════════════════════════════════════
+
+  /certify:
+    post:
+      tags: [Certification]
+      summary: Prop firm session certification
+      description: |
+        Prop firm submits signed certification for a session.
+        SIQ validates prop firm signature and countersigns.
+        Session tier upgrades to PROP_FIRM_CERTIFIED.
+        Certification is appended to certifications[] array —
+        original session record is never mutated.
+
+        TODO: Implement in Phase 2.
+      operationId: certifySession
+      security:
+        - PropFirmKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificationRequest'
+            examples:
+              apex:
+                value:
+                  sid: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+                  prop_firm_id: "apex_trader_funding"
+                  prop_firm_signature: "af01bc99eedd112233445566778899aabbccddeeff00112233445566778899aabb"
+                  compliance_telemetry:
+                    - key: "account_id"
+                      value: "APX-123456"
+                    - key: "evaluation_phase"
+                      value: "Phase 2"
+                    - key: "breach_status"
+                      value: "NONE"
+      responses:
+        '200':
+          description: Session certified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificationResponse'
+        '400':
+          description: Invalid payload or signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Auth required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: SID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /webhooks/register:
+    post:
+      tags: [Webhooks]
+      summary: Register prop firm webhook
+      description: |
+        Register a webhook URL to receive real-time session tier upgrade events.
+        All webhook payloads are signed with HMAC-SHA256 using the provided secret.
+        Include X-SIQ-Signature header on all webhook deliveries.
+
+        TODO: Implement in Phase 2.
+      operationId: registerWebhook
+      security:
+        - PropFirmKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookRegistrationRequest'
+            examples:
+              apex:
+                value:
+                  url: "https://webhooks.apextraderfunding.com/siq"
+                  secret: "whsec_your_hmac_secret_here"
+                  events:
+                    - "session.tier_upgraded"
+                    - "session.prop_certified"
+      responses:
+        '201':
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookRegistrationResponse'
+        '400':
+          description: Invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Auth required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══════════════════════════════════════════════
+  # PHASE 3 — TRADER CREDIT SCORE
+  # ═══════════════════════════════════════════════
+
+  /traders/{alias}/score:
+    get:
+      tags: [Traders]
+      summary: Get Trader Credit Score
+      description: |
+        Returns TCS score, tier, component breakdown, confidence level,
+        and behavioral penalty summary for a trader alias.
+        Only available for traders with public profiles.
+
+        TODO: Implement in Phase 3.
+      operationId: getTraderScore
+      security: []
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "delta_hawk"
+      responses:
+        '200':
+          description: Trader Credit Score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TCSResponse'
+              examples:
+                elite:
+                  value:
+                    alias: "delta_hawk"
+                    tcs_score: 742
+                    tcs_tier: "Elite"
+                    confidence_level: "HIGH"
+                    confidence_value: 0.86
+                    trade_count: 1342
+                    components:
+                      consistency: 0.82
+                      risk_discipline: 0.88
+                      longevity: 0.76
+                      efficiency: 0.79
+                      integrity: 0.93
+                    penalties:
+                      revenge_trading: 0.05
+                      martingale_patterns: 0.0
+                      overtrading: 0.07
+                    last_updated: "2026-03-08T18:45:00Z"
+        '403':
+          description: Trader profile is private
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Trader not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /traders/{alias}/sessions:
+    get:
+      tags: [Traders]
+      summary: List verified sessions for a trader
+      description: |
+        Returns cursor-paginated list of public verified sessions.
+        Use next_cursor from response to fetch the next page.
+        Filters for instrument, date range, and tier coming in Phase 4.
+
+        TODO: Implement in Phase 3.
+      operationId: listTraderSessions
+      security: []
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "delta_hawk"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from previous response
+          schema:
+            type: string
+            example: "eyJvZmZzZXQiOjIwMH0"
+      responses:
+        '200':
+          description: Paginated session list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraderSessionsResponse'
+        '403':
+          description: Trader profile is private
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Trader not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Standard API key for session submission and general write operations.
+        Intended for platforms, plugins, and trusted integrators.
+    PropFirmKeyAuth:
+      type: apiKey
+      in: header
+      name: X-PropFirm-Key
+      description: |
+        Prop firm API key with elevated scope.
+        Required for /certify and /webhooks/register endpoints.
+        Bound to a specific prop firm identity.
+
+  schemas:
+
+    PnlDisplay:
+      type: object
+      required: [mode, value]
+      description: Trader-controlled P&L display, set at issuance and immutable.
+      properties:
+        mode:
+          type: string
+          enum: [R_MULTIPLE, ABSOLUTE]
+          example: "R_MULTIPLE"
+        value:
+          type: number
+          format: double
+          example: 3.5
+        currency:
+          type: string
+          nullable: true
+          description: Currency code when mode is ABSOLUTE. Null for R_MULTIPLE.
+          example: "USD"
+
+    SessionStats:
+      type: object
+      description: Session-level statistics. Schema version tracked via stats_schema_version.
+      required: [trade_count]
+      properties:
+        trade_count:
+          type: integer
+          minimum: 1
+          example: 7
+        win_rate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          example: 0.71
+        avg_r_multiple:
+          type: number
+          format: double
+          example: 1.4
+        max_drawdown_r:
+          type: number
+          format: double
+          example: -1.0
+        gross_pnl_r:
+          type: number
+          format: double
+          example: 3.5
+        profit_factor:
+          type: number
+          format: double
+          example: 2.1
+        duration_minutes:
+          type: integer
+          example: 95
+
+    MerklePathNode:
+      type: object
+      required: [hash, position]
+      description: Single node in the Merkle inclusion path with sibling position.
+      properties:
+        hash:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5"
+        position:
+          type: string
+          enum: [LEFT, RIGHT]
+          description: Position of this sibling relative to the current node.
+          example: "LEFT"
+
+    Certification:
+      type: object
+      description: A single prop firm certification appended to a session record.
+      properties:
+        prop_firm_id:
+          type: string
+          example: "apex_trader_funding"
+        prop_firm_signature:
+          type: string
+          example: "af01bc99ee..."
+        siq_countersignature:
+          type: string
+          example: "bb22cc44dd..."
+        compliance_telemetry:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceTelemetryItem'
+        certified_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T21:05:12Z"
+
+    ComplianceTelemetryItem:
+      type: object
+      required: [key, value]
+      properties:
+        key:
+          type: string
+          example: "evaluation_phase"
+        value:
+          type: string
+          example: "Phase 2"
+
+    SessionPayload:
+      type: object
+      required: [alias, instrument, date, pnl_display, platform, session_stats]
+      description: |
+        Canonical session payload. Must be RFC 8785 JCS serialized before
+        BLAKE3 hashing. Any additional fields must be stable — changes
+        alter the canonical hash and produce a different SID.
+      properties:
+        alias:
+          type: string
+          example: "delta_hawk"
+        instrument:
+          type: string
+          example: "NQ"
+        date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        pnl_display:
+          $ref: '#/components/schemas/PnlDisplay'
+        platform:
+          type: string
+          enum: [NINJATRADER_8, TRADINGVIEW, SIERRA_CHART, OTHER]
+          example: "NINJATRADER_8"
+        prop_firm:
+          type: string
+          nullable: true
+          example: "ApexTraderFunding"
+        stats_schema_version:
+          type: string
+          description: Version of the session_stats schema. Increment when fields change.
+          example: "1.0"
+        session_stats:
+          $ref: '#/components/schemas/SessionStats'
+        tags:
+          type: array
+          description: |
+            Reserved for future Moneyball classification.
+            Examples: instrument_class, session_type, setup_tag, strategy_family.
+          items:
+            type: string
+          example: []
+        nt8_challenge:
+          type: object
+          description: NT8 challenge-response token object.
+          properties:
+            token:
+              type: string
+              example: "nt8_9f3c6b1a2d7e4f0c"
+            issued_at:
+              type: string
+              format: date-time
+              example: "2026-03-08T20:13:00Z"
+
+    SessionRecord:
+      type: object
+      description: Full immutable verified session record.
+      required:
+        - sid
+        - alias
+        - instrument
+        - date
+        - pnl_display
+        - platform
+        - verification_tier
+        - tier_label
+        - session_stats
+        - certifications
+        - key_id
+        - signature
+        - leaf_hash
+        - merkle_root
+        - merkle_path
+        - anchor_date
+        - issued_at
+        - card_version
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: BLAKE3 hash of RFC 8785 JCS canonical session payload.
+          example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+        alias:
+          type: string
+          example: "delta_hawk"
+        instrument:
+          type: string
+          example: "NQ"
+        date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        pnl_display:
+          $ref: '#/components/schemas/PnlDisplay'
+        platform:
+          type: string
+          example: "NINJATRADER_8"
+        prop_firm:
+          type: string
+          nullable: true
+          example: "ApexTraderFunding"
+        verification_tier:
+          type: string
+          enum: [BASIC_VERIFIED, DEEP_VERIFIED, PROP_FIRM_CERTIFIED]
+          example: "BASIC_VERIFIED"
+        tier_label:
+          type: string
+          enum: [Silver, Blue, Gold]
+          example: "Silver"
+        stats_schema_version:
+          type: string
+          example: "1.0"
+        session_stats:
+          $ref: '#/components/schemas/SessionStats'
+        certifications:
+          type: array
+          description: |
+            Append-only list of prop firm certifications.
+            Original session record is never mutated — certifications are appended.
+          items:
+            $ref: '#/components/schemas/Certification'
+        tags:
+          type: array
+          items:
+            type: string
+          example: []
+        key_id:
+          type: string
+          description: Identifier for the SIQ signing key used. Enables key rotation auditing.
+          example: "siq-ed25519-2026-03-08"
+        signature:
+          type: string
+          description: ED25519 signature (hex) over canonical session payload.
+          example: "9f3a7c6d5e4f3a2b1c0d9e84c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0ff"
+        leaf_hash:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "b7c9e1f2a3d4e5f6071829304a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7"
+        merkle_root:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "c1d2e3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566"
+        merkle_path:
+          type: array
+          description: Sibling nodes from leaf to root with LEFT/RIGHT position for independent verification.
+          items:
+            $ref: '#/components/schemas/MerklePathNode'
+        anchor_date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        issued_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T20:15:32Z"
+        card_version:
+          type: string
+          example: "1.0.0"
+
+    SessionCreatedResponse:
+      type: object
+      required: [sid, signature, issued_at]
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+        signature:
+          type: string
+          example: "9f3a7c6d5e4f3a2b1c0d9e84c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0ff"
+        key_id:
+          type: string
+          example: "siq-ed25519-2026-03-08"
+        issued_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T20:15:32Z"
+        verification_url:
+          type: string
+          example: "https://siqtradingcards.com/verify/4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+
+    ChallengeResponse:
+      type: object
+      required: [token, issued_at, expires_at]
+      properties:
+        token:
+          type: string
+          example: "nt8_9f3c6b1a2d7e4f0c"
+        issued_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T20:13:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T20:14:30Z"
+
+    MerkleProof:
+      type: object
+      required: [sid, leaf_hash, merkle_root, merkle_path, anchor_date]
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+        leaf_hash:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "b7c9e1f2a3d4e5f6071829304a5b6c7d8e9f0a1b2c3d4e5f6071829304a5b6c7"
+        merkle_root:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "c1d2e3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566"
+        merkle_path:
+          type: array
+          items:
+            $ref: '#/components/schemas/MerklePathNode'
+        anchor_date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        github_commit_url:
+          type: string
+          example: "https://github.com/strikeiqcards/ledger/commit/abc123def456"
+
+    AnchorRecord:
+      type: object
+      required: [date, merkle_root, session_count, anchored_at]
+      properties:
+        date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        merkle_root:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "c1d2e3f4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566"
+        session_count:
+          type: integer
+          example: 142
+        github_commit_url:
+          type: string
+          example: "https://github.com/strikeiqcards/ledger/commit/abc123def456"
+        gpg_signed:
+          type: boolean
+          example: true
+        anchored_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T23:59:59Z"
+
+    PublicKeyRecord:
+      type: object
+      required: [key_id, algorithm, public_key, created_at]
+      properties:
+        key_id:
+          type: string
+          example: "siq-ed25519-2026-03-08"
+        algorithm:
+          type: string
+          example: "ED25519"
+        public_key:
+          type: string
+          example: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINuSmJKxULQf42JPodzZLt7tcBKcT1NjXiuIGKAO5Evt SIQ Trading Cards Ledger Key 2026"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T00:00:00Z"
+        rotation_schedule:
+          type: string
+          example: "annually or upon compromise"
+        github_url:
+          type: string
+          example: "https://github.com/strikeiqcards/ledger/blob/main/keys/siq_public_key.pub"
+
+    HealthResponse:
+      type: object
+      required: [status, version, ledger_record_count]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+          example: "ok"
+        version:
+          type: string
+          example: "1.0.0"
+        environment:
+          type: string
+          example: "production"
+        ledger_record_count:
+          type: integer
+          example: 142031
+        last_anchor_timestamp:
+          type: string
+          format: date-time
+          example: "2026-03-08T23:59:59Z"
+        git_ledger:
+          type: object
+          properties:
+            repository:
+              type: string
+              example: "https://github.com/strikeiqcards/ledger"
+            last_commit_hash:
+              type: string
+              example: "abc123def456abc123def456abc123def456abc123"
+            last_commit_timestamp:
+              type: string
+              format: date-time
+              example: "2026-03-08T23:59:59Z"
+
+    CertificationRequest:
+      type: object
+      required: [sid, prop_firm_id, prop_firm_signature]
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        prop_firm_id:
+          type: string
+          example: "apex_trader_funding"
+        prop_firm_signature:
+          type: string
+          example: "af01bc99ee..."
+        compliance_telemetry:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComplianceTelemetryItem'
+
+    CertificationResponse:
+      type: object
+      required: [sid, verification_tier, tier_label, siq_countersignature, certified_at]
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        verification_tier:
+          type: string
+          enum: [PROP_FIRM_CERTIFIED]
+          example: "PROP_FIRM_CERTIFIED"
+        tier_label:
+          type: string
+          example: "Gold"
+        siq_countersignature:
+          type: string
+          example: "bb22cc44dd..."
+        key_id:
+          type: string
+          example: "siq-ed25519-2026-03-08"
+        certified_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T21:05:12Z"
+
+    WebhookRegistrationRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: "https://webhooks.apextraderfunding.com/siq"
+        secret:
+          type: string
+          description: |
+            Shared secret for HMAC-SHA256 webhook signing.
+            SIQ will include X-SIQ-Signature header on all webhook deliveries.
+          example: "whsec_your_hmac_secret_here"
+        events:
+          type: array
+          items:
+            type: string
+            enum: [session.tier_upgraded, session.prop_certified]
+          example:
+            - "session.tier_upgraded"
+            - "session.prop_certified"
+
+    WebhookRegistrationResponse:
+      type: object
+      required: [id, url, events, created_at]
+      properties:
+        id:
+          type: string
+          example: "wh_01hxyzabcd1234"
+        url:
+          type: string
+          format: uri
+          example: "https://webhooks.apextraderfunding.com/siq"
+        events:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T20:20:00Z"
+
+    TCSResponse:
+      type: object
+      required: [alias, tcs_score, tcs_tier, confidence_level, confidence_value, trade_count, components, penalties, last_updated]
+      properties:
+        alias:
+          type: string
+          example: "delta_hawk"
+        tcs_score:
+          type: integer
+          minimum: 300
+          maximum: 850
+          example: 742
+        tcs_tier:
+          type: string
+          enum: [High Risk, Developing, Competent, Elite, Institutional]
+          example: "Elite"
+        confidence_level:
+          type: string
+          enum: [LOW, MEDIUM, HIGH]
+          example: "HIGH"
+        confidence_value:
+          type: number
+          format: double
+          description: Confidence value 0-1. Computed as 1 - e^(-trades/150).
+          example: 0.86
+        trade_count:
+          type: integer
+          example: 1342
+        components:
+          type: object
+          required: [consistency, risk_discipline, longevity, efficiency, integrity]
+          properties:
+            consistency:
+              type: number
+              format: double
+              example: 0.82
+            risk_discipline:
+              type: number
+              format: double
+              example: 0.88
+            longevity:
+              type: number
+              format: double
+              example: 0.76
+            efficiency:
+              type: number
+              format: double
+              example: 0.79
+            integrity:
+              type: number
+              format: double
+              example: 0.93
+        penalties:
+          type: object
+          required: [revenge_trading, martingale_patterns, overtrading]
+          properties:
+            revenge_trading:
+              type: number
+              format: double
+              example: 0.05
+            martingale_patterns:
+              type: number
+              format: double
+              example: 0.0
+            overtrading:
+              type: number
+              format: double
+              example: 0.07
+        last_updated:
+          type: string
+          format: date-time
+          example: "2026-03-08T18:45:00Z"
+
+    TraderSessionsResponse:
+      type: object
+      required: [alias, sessions]
+      properties:
+        alias:
+          type: string
+          example: "delta_hawk"
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraderSessionSummary'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for fetching the next page. Null when no more results.
+          example: "eyJvZmZzZXQiOjIwMH0"
+
+    TraderSessionSummary:
+      type: object
+      required: [sid, date, instrument, pnl_display, verification_tier, tier_label]
+      properties:
+        sid:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          example: "4c8f5c6c4a5e2b3a1d9f0b8e7c6d5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f"
+        date:
+          type: string
+          format: date
+          example: "2026-03-08"
+        instrument:
+          type: string
+          example: "NQ"
+        pnl_display:
+          $ref: '#/components/schemas/PnlDisplay'
+        verification_tier:
+          type: string
+          enum: [BASIC_VERIFIED, DEEP_VERIFIED, PROP_FIRM_CERTIFIED]
+          example: "BASIC_VERIFIED"
+        tier_label:
+          type: string
+          enum: [Silver, Blue, Gold]
+          example: "Silver"
+
+    UnverifiedResponse:
+      type: object
+      required: [status, sid, checked_at]
+      properties:
+        status:
+          type: string
+          enum: [UNVERIFIED]
+          example: "UNVERIFIED"
+        sid:
+          type: string
+          example: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        checked_at:
+          type: string
+          format: date-time
+          example: "2026-03-08T21:14:27Z"
+        error:
+          $ref: '#/components/schemas/ErrorObject'
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorObject'
+
+    ErrorObject:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - SID_NOT_FOUND
+            - INVALID_PAYLOAD
+            - INVALID_SIGNATURE
+            - AUTH_REQUIRED
+            - INSUFFICIENT_SCOPE
+            - RATE_LIMITED
+            - LEDGER_ERROR
+            - CHALLENGE_EXPIRED
+            - DUPLICATE_SESSION
+          example: "INVALID_PAYLOAD"
+        message:
+          type: string
+          example: "Payload failed schema validation."
+        details:
+          type: object
+          additionalProperties: true
+          example:
+            field: "session_stats.trade_count"
+            issue: "Must be >= 1"
